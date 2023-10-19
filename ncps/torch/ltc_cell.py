@@ -28,6 +28,8 @@ class LTCCell(nn.Module):
         ode_unfolds=6,
         epsilon=1e-8,
         implicit_param_constraints=False,
+
+        system_tau_range = (-50000, 50000)    #Basically an unrestricted range  
     ):
         """A `Liquid time-constant (LTC) <https://ojs.aaai.org/index.php/AAAI/article/view/16936>`_ cell.
 
@@ -64,6 +66,7 @@ class LTCCell(nn.Module):
             "sensory_w": (0.001, 1.0),
             "sensory_sigma": (3, 8),
             "sensory_mu": (0.3, 0.8),
+            "tau_system": system_tau_range
         }
         self._wiring = wiring
         self._input_mapping = input_mapping
@@ -172,6 +175,14 @@ class LTCCell(nn.Module):
             requires_grad=False,
         )
 
+        #Defining Time constant of system-not optimizing
+        self._params["tau_system"] = self.add_weight(
+            name="tau_system",
+            init_value=self._get_init_value((self.state_size,), "tau_system"),
+            requires_grad=False
+        )
+
+
         if self._input_mapping in ["affine", "linear"]:
             self._params["input_w"] = self.add_weight(
                 name="input_w",
@@ -219,10 +230,15 @@ class LTCCell(nn.Module):
         w_numerator_sensory = torch.sum(sensory_rev_activation, dim=1)
         w_denominator_sensory = torch.sum(sensory_w_activation, dim=1)
 
+        """
         # cm/t is loop invariant
         cm_t = self.make_positive_fn(self._params["cm"]) / (
             elapsed_time / self._ode_unfolds
         )
+        """
+
+        cm = self.make_positive_fn(self._params["cm"])
+        delta = elapsed_time / self._ode_unfolds
 
         # Unfold the multiply ODE multiple times into one RNN step
         w_param = self.make_positive_fn(self._params["w"])
@@ -240,8 +256,23 @@ class LTCCell(nn.Module):
             w_denominator = torch.sum(w_activation, dim=1) + w_denominator_sensory
 
             gleak = self.make_positive_fn(self._params["gleak"])
-            numerator = cm_t * v_pre + gleak * self._params["vleak"] + w_numerator
-            denominator = cm_t + gleak + w_denominator
+
+            """
+            numerator = (cm/delta) * v_pre + gleak * self._params["vleak"] + w_numerator
+            denominator = (cm/delta) + gleak + w_denominator
+            """
+
+            tau_system_reciprocal = (gleak / cm) + (w_denominator / cm)     #IMPORTANT!!!
+            tau_system = 1.0/tau_system_reciprocal                          #This is the quantity we want to restrict
+
+
+            #Here, update parameter "tau_system", so we can access it-also clamping the values
+            tau_system = torch.clamp(tau_system, self._init_ranges["tau_system"][0], self._init_ranges["tau_system"][1])
+            self._params["tau_system"] = tau_system
+
+
+            numerator = v_pre + (delta / cm) * ((gleak * self._params["vleak"]) + w_numerator)
+            denominator = 1.0 + delta * (1/self._params["tau_system"])
 
             # Avoid dividing by 0
             v_pre = numerator / (denominator + self._epsilon)

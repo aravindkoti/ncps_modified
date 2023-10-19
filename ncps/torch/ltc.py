@@ -33,6 +33,8 @@ class LTC(nn.Module):
         ode_unfolds=6,
         epsilon=1e-8,
         implicit_param_constraints=True,
+
+        restrict_tau = None     #If you restrict tau, argument has to be a range tuple
     ):
         """Applies a `Liquid time-constant (LTC) <https://ojs.aaai.org/index.php/AAAI/article/view/16936>`_ RNN to an input sequence.
 
@@ -78,20 +80,35 @@ class LTC(nn.Module):
         self.wiring_or_units = units
         self.batch_first = batch_first
         self.return_sequences = return_sequences
-
+        
         if isinstance(units, ncps.wirings.Wiring):
             wiring = units
         else:
             wiring = ncps.wirings.FullyConnected(units)
-        self.rnn_cell = LTCCell(
-            wiring=wiring,
-            in_features=input_size,
-            input_mapping=input_mapping,
-            output_mapping=output_mapping,
-            ode_unfolds=ode_unfolds,
-            epsilon=epsilon,
-            implicit_param_constraints=implicit_param_constraints,
-        )
+
+        self.restrict_tau = restrict_tau
+        if self.restrict_tau:
+            self.rnn_cell = LTCCell(
+                wiring=wiring,
+                in_features=input_size,
+                input_mapping=input_mapping,
+                output_mapping=output_mapping,
+                ode_unfolds=ode_unfolds,
+                epsilon=epsilon,
+                implicit_param_constraints=implicit_param_constraints,
+                system_tau_range=restrict_tau
+            )
+        else:
+            self.rnn_cell = LTCCell(
+                wiring=wiring,
+                in_features=input_size,
+                input_mapping=input_mapping,
+                output_mapping=output_mapping,
+                ode_unfolds=ode_unfolds,
+                epsilon=epsilon,
+                implicit_param_constraints=implicit_param_constraints,
+            )
+
         self._wiring = wiring
         self.use_mixed = mixed_memory
         if self.use_mixed:
@@ -129,6 +146,12 @@ class LTC(nn.Module):
         :param timespans:
         :return: A pair (output, hx), where output and hx the final hidden state of the RNN
         """
+
+
+        #Imposing range restriction on system time constant
+        if self.restrict_tau:
+                tau_tracker = []
+
         device = input.device
         is_batched = input.dim() == 3
         batch_dim = 0 if self.batch_first else 1
@@ -172,6 +195,7 @@ class LTC(nn.Module):
                 c_state = c_state.unsqueeze(0) if c_state is not None else None
 
         output_sequence = []
+    
         for t in range(seq_len):
             if self.batch_first:
                 inputs = input[:, t]
@@ -182,7 +206,15 @@ class LTC(nn.Module):
 
             if self.use_mixed:
                 h_state, c_state = self.lstm(inputs, (h_state, c_state))
+
             h_out, h_state = self.rnn_cell.forward(inputs, h_state, ts)
+
+
+            #Appending system time constants for the layer
+            if self.restrict_tau:
+                tau_tracker.append(self.rnn_cell._params["tau_system"].squeeze().tolist())      #Appends a list
+
+
             if self.return_sequences:
                 output_sequence.append(h_out)
 
@@ -198,4 +230,8 @@ class LTC(nn.Module):
             readout = readout.squeeze(batch_dim)
             hx = (h_state[0], c_state[0]) if self.use_mixed else h_state[0]
 
-        return readout, hx
+
+        if self.restrict_tau:
+            return readout, hx, tau_tracker
+        else:
+            return readout, hx
