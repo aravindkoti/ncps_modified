@@ -232,6 +232,6 @@ class LTC(nn.Module):
 
 
         if self.restrict_tau:
-            return readout, hx, tau_tracker
+            return readout, hx, torch.tensor(tau_tracker).flatten().tolist()    #Getting a flat list
         else:
             return readout, hx
